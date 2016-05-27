@@ -12,8 +12,6 @@ Example
 
 ```javascript
 const lazyDb = require('.');
-const LazyDbRead = lazyDb.Read;
-const LazyDbWrite = lazyDb.Write;
 
 // connect to the environment and DB
 var env = lazyDb.open({
@@ -26,13 +24,11 @@ var dbi = env.openDbi({
 });
 
 // create lazy object for write
-var obj1 = LazyDbWrite('MyId1', dbi);
+var obj1 = lazyDb.write('MyId1', dbi);
 
 // write properties
 obj1.foo = 'Hello world!';
 obj1.foo2 = 12345;
-obj1.prop3.sub1 = 'sub1 str for prop3';
-obj1.prop4.sub1 = 'sub1 str for prop4';
 obj1.example = {
     key1: 'abcde',
     key2: 123123,
@@ -41,11 +37,14 @@ obj1.example = {
         subKey2: -12
     }
 };
+obj1.array = [1, 2, 3];
+delete obj1.arr;
 
-// create lazy object for read
-var obj = LazyDbRead('MyId1', dbi);
 
-console.log('Object:');
+// create lazy object with cache for read
+var obj = lazyDb.read('MyId1', dbi, null, true);
+
+console.log('Object (MyId1):');
 console.log('---------------------');
 
 // look at the keys
@@ -56,15 +55,38 @@ console.log('');
 // access some properties
 console.log('foo:', obj.foo);
 console.log('foo2:', obj.foo2);
-console.log('prop3:', obj.prop3);
-console.log('prop3.sub1:', obj.prop3.sub1);
-console.log('prop4.sub1:', obj.prop4.sub1);
+
+console.log('example:', obj.example);
+console.log('example.key3 keys:', Reflect.ownKeys(obj.example.key3));
 console.log('example.key2:', obj.example.key2);
 console.log('example.key3:', obj.example.key3.subKey1);
-console.log('example.key3 keys:', Reflect.ownKeys(obj.example.key3));
+
+console.log('array:', obj.array);
+console.log('array keys:', Reflect.ownKeys(obj.array));
+console.log('array[0]:', obj.array[0]);
+console.log('array[2]:', obj.array[2]);
 console.log('');
 
 console.log('object on finish:', obj);
+console.log('');
+
+// get sub-object from property `example`
+var subObj = lazyDb.read('MyId1.example', dbi, null, true);
+console.log('Sub object (MyId1.example):');
+console.log('---------------------');
+
+console.log('key2:', subObj.key2);
+console.log('key3.subKey1:', subObj.key3.subKey1);
+console.log('key3 keys:', Reflect.ownKeys(subObj.key3));
+console.log('');
+
+console.log('Sub object on finish:', subObj);
+console.log('');
+
+var subObj2 = lazyDb.read('MyId1.foo', dbi, null, true);
+console.log('Direct value:');
+console.log('---------------------');
+console.log('MyId1.foo:', subObj2);
 
 console.log('\nDB:');
 lazyDb.printDb(dbi);
@@ -76,7 +98,7 @@ env.close();
 API
 -------
 
-### lazyDb.open
+### open
 
 `lazyDb.open(Object options) -> Object`
 
@@ -97,24 +119,32 @@ var dbi = env.openDbi({
 });
 ```
 
-### lazyDb.Read
+### read
 
-`lazyDb.Read(String key, Object dbi, [Object txn]) -> Proxy`
+`lazyDb.read(String key, Object dbi, [Object txn], [Boolean cache]) -> Proxy|*`
 
-Create object connected to database `dbi` with unique key `key`. If transaction `txn` is passed, object will use it,
+Read value from database directly or create proxy object by `key`. If transaction `txn` is passed, object will use it,
 otherwise internal transaction(s) will be started.
-Returned object can be modified, but nothing will be written to database. Reading from database is performed
-once on first property access. To use updated db values, create new read object. 
+When cache is true, values from DB are set to object's properties (cached). In this case reading from database is
+performed once on first property access.
+Returned object can be modified, but nothing will be written to database.
 
-### lazyDb.Write
+### write
 
-`lazyDb.Write(String key, Object dbi, [Object txn]) -> Proxy`
+`lazyDb.write(String key, Object dbi, [Object txn]) -> Proxy`
 
 Create object connected to database `dbi` with unique key `key`. If transaction `txn` is passed, object will use it,
 otherwise internal transaction(s) will be started.
 When properties of returned object are modified, they are automatically stored in database.
 
-### lazyDb.printDb
+### del
+
+`lazyDb.del(String key, Object dbi, [Object txn])`
+
+Remove value or object from DB by `key`. If transaction `txn` is passed, object will use it,
+otherwise internal transaction(s) will be started.
+
+### printDb
 
 `lazyDb.printDb(Object dbi, [Number skip = 0], [Number limit = 100])`
 

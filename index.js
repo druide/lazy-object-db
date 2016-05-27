@@ -1,4 +1,8 @@
+/**
+ * @module
+ */
 const lmdb = require('node-lmdb');
+var fs = require('fs');
 
 /**
  * Open environment
@@ -7,6 +11,11 @@ const lmdb = require('node-lmdb');
  */
 function open (options) {
     var env = new lmdb.Env();
+    try {
+        fs.accessSync(options.path, fs.R_OK | fs.W_OK);
+    } catch (e) {
+        fs.mkdirSync(options.path);
+    }
     env.open(options);
     return env;
 }
@@ -15,6 +24,12 @@ function printFn (key, data) {
     console.log(key + ' =', data);
 }
 
+/**
+ * Print db content to console
+ * @param  {Object} dbi
+ * @param  {Number} [skip]
+ * @param  {Number} [limit]
+ */
 function printDb (dbi, skip, limit) {
     console.log('---------------------');
     skip = skip || 0;
@@ -31,12 +46,17 @@ function printDb (dbi, skip, limit) {
     console.log('---------------------');
 }
 
-function del (target) {
-    var _ = Reflect.get(target, '_');
-    var fullKey = _.key;
-    var dbi = _.dbi;
-    var txn = _.txn || dbi.env.beginTxn();
-    var cursor = new lmdb.Cursor(txn, dbi);
+/**
+ * Remove key and it's subkeys from db
+ * @param  {String} key
+ * @param  {Object} dbi
+ * @param  {Object} [txn]
+ * @return {Boolean}
+ */
+function del (key, dbi, txn) {
+    var fullKey = key;
+    var txn2 = txn || dbi.env.beginTxn();
+    var cursor = new lmdb.Cursor(txn2, dbi);
     var found = cursor.goToRange(fullKey);
     var stop = false;
 
@@ -55,7 +75,7 @@ function del (target) {
     }
 
     cursor.close();
-    if (!_.txn) txn.commit();
+    if (!txn) txn2.commit();
     return true;
 }
 
@@ -63,32 +83,45 @@ function NOPE () {
     throw new Error('Operation not supported');
 }
 
-function LazyDbRead (key, dbi, txn) {
-    return new Proxy({_: {key: key, dbi: dbi, txn: txn}}, lazyDbReadHandler);
+/**
+ * Read DB object. Returns value from db, if key present, otherwise makes proxy object for access.
+ * @param {String} key
+ * @param {Object} dbi
+ * @param {Object} [txn] external transaction
+ * @param {Boolean} cache
+ * @return {Proxy|*} value or Proxy
+ */
+function read (key, dbi, txn, cache) {
+    var txn2 = txn || dbi.env.beginTxn({readOnly: true});
+    var v = txn2.get(dbi, key);
+    if (!txn) txn2.abort();
+    // if value is present, return it
+    if (v !== null) return v;
+
+    // otherwise create proxy
+    var target = {_: {key: key, dbi: dbi}};
+    if (typeof txn !== 'undefined') target._.txn = txn;
+    if (typeof cache !== 'undefined') target._.cache = cache;
+    if (!has(target)) return undefined;
+    return new Proxy(target, readHandler);
 }
 
-var lazyDbReadHandler = {
+var readHandler = {
     get: function (target, key, receiver) {
         if (typeof key !== 'string' || key === 'inspect' || key === 'valueOf') {
             return Reflect.get(target, key, receiver);
         }
         var v;
+
+        // if has own property, return it without db read
         if (Reflect.has(target, key, receiver)) {
             v =  Reflect.get(target, key, receiver);
             return v === null ? undefined : v;
         }
 
         var fullKey = target._.key + '.' + key;
-        var dbi = target._.dbi;
-        var txn = target._.txn || dbi.env.beginTxn({readOnly: true});
-        v = txn.get(dbi, fullKey);
-        if (!target._.txn) txn.abort();
-        var isLeaf = v === null && has(target, key);
-        if (isLeaf) {
-            target[key] = LazyDbRead(fullKey, dbi, target._.txn);
-            return Reflect.get(target, key, receiver);
-        }
-        target[key] = v;
+        v = read(fullKey, target._.dbi, target._.txn, target._.cache);
+        if (typeof v === 'object' || target._.cache) target[key] = v;
         return v;
     },
     set: function (target, key, value, receiver) {
@@ -98,7 +131,7 @@ var lazyDbReadHandler = {
             Reflect.set(target, key, null, receiver);
         } else {
             if (typeof value === 'object') {
-                var obj = target[key] = LazyDbRead(fullKey, target._.dbi, target._.txn);
+                var obj = target[key] = read(fullKey, target._.dbi, target._.txn, target._.cache);
                 Object.keys(value).forEach(function (key) {
                     obj[key] = value[key];
                 });
@@ -118,16 +151,25 @@ var lazyDbReadHandler = {
     setPrototypeOf: NOPE,
 };
 
-function LazyDbWrite (key, dbi, txn) {
-    return new Proxy({_: {key: key, dbi: dbi, txn: txn}}, lazyDbWriteHandler);
+/**
+ * Create proxy object for db writes
+ * @param  {String} key
+ * @param  {Object} dbi
+ * @param  {Object} [txn] external transaction
+ * @return {Proxy}
+ */
+function write (key, dbi, txn) {
+    return new Proxy({_: {key: key, dbi: dbi, txn: txn}}, writeHandler);
 }
 
-var lazyDbWriteHandler = {
+var writeHandler = {
     get: function (target, key, receiver) {
         if (typeof key !== 'string' || key === 'inspect' || key === 'valueOf') {
             return Reflect.get(target, key, receiver);
         }
         var v;
+
+        // if has own property, return it without db read
         if (Reflect.has(target, key, receiver)) {
             v =  Reflect.get(target, key, receiver);
             return v === null ? undefined : v;
@@ -140,21 +182,22 @@ var lazyDbWriteHandler = {
         if (!target._.txn) txn.abort();
         var isLeaf = v === null;
         if (isLeaf) {
-            target[key] = LazyDbWrite(fullKey, dbi, target._.txn);
+            target[key] = write(fullKey, dbi, target._.txn);
             return Reflect.get(target, key, receiver);
         }
-        target[key] = v;
+        //target[key] = v;
         return v;
     },
     set: function (target, key, value, receiver) {
         if (key === '_') return false;
         var fullKey = target._.key + '.' + key;
+
+        // cleanup previous value(s) from DB
         this.deleteProperty(target, key);
-        if (value === null || value === undefined) {
-            //Reflect.deleteProperty(target, key, receiver);
-        } else {
+
+        if (value !== null && value !== undefined) {
             if (typeof value === 'object') {
-                var obj = target[key] = LazyDbWrite(fullKey, target._.dbi, target._.txn);
+                var obj = target[key] = write(fullKey, target._.dbi, target._.txn);
                 Object.keys(value).forEach(function (key) {
                     obj[key] = value[key];
                 });
@@ -164,7 +207,6 @@ var lazyDbWriteHandler = {
         }
         var dbi = target._.dbi;
         var txn = target._.txn || dbi.env.beginTxn();
-        // if (txn.get(dbi, target._.key) !== LEAF_SIGNATURE) txn.put(target._.dbi, target._.key, LEAF_SIGNATURE);
         txn.put(dbi, fullKey, value);
         if (!target._.txn) txn.commit();
         return true;
@@ -204,7 +246,7 @@ var lazyDbWriteHandler = {
 };
 
 function has (target, key) {
-    var fullKey = target._.key + '.' + key;
+    var fullKey = key ? target._.key + '.' + key : target._.key;
     if (key === '_') return false;
     if (Reflect.has(target, key)) {
         return Reflect.get(target, key) !== null;
@@ -214,10 +256,10 @@ function has (target, key) {
     var txn = target._.txn || dbi.env.beginTxn({readOnly: true});
     var cursor = new lmdb.Cursor(txn, dbi);
     var found = cursor.goToRange(fullKey);
-    var has = false;
+    var exists = false;
 
     if (found && (found === fullKey || found.indexOf(fullKey + '.') === 0)) {
-        has = true;
+        exists = true;
         /*if (found === fullKey) {
             cursor.get(function (key2, data) {
                 target[key] = data;
@@ -227,7 +269,7 @@ function has (target, key) {
 
     cursor.close();
     if (!target._.txn) txn.abort();
-    return has;
+    return exists;
 }
 
 function ownKeys (target) {
@@ -284,6 +326,6 @@ function ownKeys (target) {
 
 exports.open = open;
 exports.del = del;
-exports.Read = LazyDbRead;
-exports.Write = LazyDbWrite;
+exports.read = read;
+exports.write = write;
 exports.printDb = printDb;
