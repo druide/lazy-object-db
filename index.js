@@ -99,9 +99,8 @@ function read (key, dbi, txn, cache) {
     if (v !== null) return v;
 
     // otherwise create proxy
-    var target = {_: {key: key, dbi: dbi}};
-    if (typeof txn !== 'undefined') target._.txn = txn;
-    if (typeof cache !== 'undefined') target._.cache = cache;
+    var target = {_: {key: key, dbi: dbi, txn: txn, cache: cache}};
+    // @todo not checking by `has` increases performance, but any reading of absent property creates empty proxy
     if (!has(target)) return undefined;
     return new Proxy(target, readHandler);
 }
@@ -121,7 +120,11 @@ var readHandler = {
 
         var fullKey = target._.key + '.' + key;
         v = read(fullKey, target._.dbi, target._.txn, target._.cache);
-        if (typeof v === 'object' || target._.cache) target[key] = v;
+        if (typeof v === 'undefined' || v === null) {
+            if (target._.cache) target[key] = null;
+        } else if (typeof v === 'object' || target._.cache) {
+            target[key] = v;
+        }
         return v;
     },
     set: function (target, key, value, receiver) {
@@ -246,11 +249,11 @@ var writeHandler = {
 };
 
 function has (target, key) {
-    var fullKey = key ? target._.key + '.' + key : target._.key;
     if (key === '_') return false;
     if (Reflect.has(target, key)) {
         return Reflect.get(target, key) !== null;
     }
+    var fullKey = key ? target._.key + '.' + key : target._.key;
 
     var dbi = target._.dbi;
     var txn = target._.txn || dbi.env.beginTxn({readOnly: true});

@@ -52,6 +52,7 @@ console.log('array:', obj.array);
 console.log('array keys:', Reflect.ownKeys(obj.array));
 console.log('array[0]:', obj.array[0]);
 console.log('array[2]:', obj.array[2]);
+console.log('notExists:', obj.notExists);
 console.log('');
 
 console.log('object on finish:', obj);
